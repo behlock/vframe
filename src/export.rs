@@ -5,19 +5,7 @@ use crate::{
     process::{Cancellation, Running},
 };
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
 use std::{fs, io::Write, path::Path, process::Stdio};
-
-#[derive(Debug, Serialize)]
-pub struct Frame {
-    pub index: usize,
-    pub file: String,
-    pub timestamp_seconds: f64,
-    pub timestamp: String,
-    pub width: u32,
-    pub height: u32,
-    pub change_score: f64,
-}
 
 pub fn export(
     path: &Path,
@@ -27,7 +15,7 @@ pub fn export(
     moments: &[Moment],
     directory: &Path,
     cancel: &Cancellation,
-) -> Result<Vec<Frame>> {
+) -> Result<()> {
     let (width, height) = settings.resolution.dimensions(video.width, video.height);
     eprintln!("Image size: {width} × {height} (no upscaling)");
     // Account for showinfo rounding so selection doesn't skip the sampled frame.
@@ -74,8 +62,7 @@ pub fn export(
         times.len(),
         moments.len()
     );
-    let mut frames = Vec::with_capacity(moments.len());
-    for (offset, (moment, time)) in moments.iter().zip(times).enumerate() {
+    for (offset, time) in times.into_iter().enumerate() {
         cancel.check()?;
         let index = offset + 1;
         ensure!(
@@ -94,15 +81,6 @@ pub fn export(
             "FFmpeg did not write expected image {index}"
         );
         fs::rename(original, directory.join(&filename)).context("Cannot name exported frame")?;
-        frames.push(Frame {
-            index,
-            file: format!("images/{filename}"),
-            timestamp_seconds: time,
-            timestamp,
-            width,
-            height,
-            change_score: moment.change,
-        });
     }
-    Ok(frames)
+    Ok(())
 }

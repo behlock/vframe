@@ -22,12 +22,9 @@ pub struct Source {
     _temporary: Option<TempDir>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct SourceInfo {
     pub title: String,
-    pub input: String,
-    pub video_id: Option<String>,
-    pub cached: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -57,12 +54,7 @@ pub fn resolve(input: &str, cli: &Cli, cancel: &Cancellation) -> Result<Source> 
             .into_owned();
         return Ok(Source {
             video: media::probe(&path, cancel)?,
-            info: SourceInfo {
-                title,
-                input: path.display().to_string(),
-                video_id: None,
-                cached: false,
-            },
+            info: SourceInfo { title },
             path,
             _temporary: None,
         });
@@ -81,7 +73,7 @@ pub fn resolve(input: &str, cli: &Cli, cancel: &Cancellation) -> Result<Source> 
         None
     };
     if let Some(root) = &cache_root {
-        if let Some(source) = cached_source(root, &id, &url, resolution, cancel)? {
+        if let Some(source) = cached_source(root, &id, resolution, cancel)? {
             eprintln!("Reusing cached source: {}", source.path.display());
             return Ok(source);
         }
@@ -182,9 +174,6 @@ pub fn resolve(input: &str, cli: &Cli, cancel: &Cancellation) -> Result<Source> 
         .into_owned();
     let info = SourceInfo {
         title: title.clone(),
-        input: url,
-        video_id: Some(id.clone()),
-        cached: cache_root.is_some(),
     };
     if cache_root.is_some() {
         let record = CacheRecord {
@@ -218,7 +207,6 @@ pub fn resolve(input: &str, cli: &Cli, cancel: &Cancellation) -> Result<Source> 
 fn cached_source(
     root: &Path,
     id: &str,
-    url: &str,
     resolution: Resolution,
     cancel: &Cancellation,
 ) -> Result<Option<Source>> {
@@ -261,9 +249,6 @@ fn cached_source(
                     video,
                     info: SourceInfo {
                         title: record.title,
-                        input: url.to_owned(),
-                        video_id: Some(id.to_owned()),
-                        cached: true,
                     },
                     _temporary: None,
                 }));

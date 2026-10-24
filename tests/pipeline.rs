@@ -66,45 +66,57 @@ fn result_folder(output: &Output) -> PathBuf {
     )
 }
 
-fn manifest(folder: &Path) -> Value {
-    serde_json::from_slice(&fs::read(folder.join("manifest.json")).unwrap()).unwrap()
+fn images(folder: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<_> = fs::read_dir(folder.join("images"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    files.sort();
+    files
+}
+
+fn timestamp(frame: &Path) -> f64 {
+    let stem = frame.file_stem().unwrap().to_str().unwrap();
+    let (_, time) = stem.split_once('_').unwrap();
+    time.split('-').fold(0.0, |total, part| {
+        total * 60.0 + part.parse::<f64>().unwrap()
+    })
 }
 
 #[test]
-fn extracts_changes_preserves_revisits_and_creates_a_contact_sheet() {
+fn extracts_changes_and_preserves_revisits() {
     let root = TempDir::new().unwrap();
     let source = fixture(root.path(), "640x360");
     let output = root.path().join("output");
     let result = checked(&mut cli(&source, &output));
     let folder = result_folder(&result);
-    let manifest = manifest(&folder);
-    let frames = manifest["frames"].as_array().unwrap();
-    assert_eq!(frames.len(), 4, "{manifest}");
+    let frames = images(&folder);
+    assert_eq!(frames.len(), 4);
     let mut previous = -1.0;
-    for frame in frames {
-        let time = frame["timestamp_seconds"].as_f64().unwrap();
+    for frame in &frames {
+        let time = timestamp(frame);
         assert!(time > previous);
         previous = time;
-        let image = image::open(folder.join(frame["file"].as_str().unwrap())).unwrap();
+        let image = image::open(frame).unwrap();
         assert_eq!((image.width(), image.height()), (640, 360));
     }
-    let first = image::open(folder.join(frames[0]["file"].as_str().unwrap()))
-        .unwrap()
-        .to_rgb8();
-    let last = image::open(folder.join(frames[3]["file"].as_str().unwrap()))
-        .unwrap()
-        .to_rgb8();
+    let first = image::open(&frames[0]).unwrap().to_rgb8();
+    let last = image::open(&frames[3]).unwrap().to_rgb8();
     assert!(first.get_pixel(100, 100)[0] > 240);
     assert!(
         last.get_pixel(100, 100)[0] > 240,
         "the returning red scene must remain"
     );
-    let sheet = image::open(folder.join("contact-sheet-001.jpg")).unwrap();
-    assert!(sheet.width() > 1000 && sheet.height() > 200);
     let second = result_folder(&checked(&mut cli(&source, &output)));
     assert_ne!(folder, second);
     assert_eq!(fs::read_dir(&output).unwrap().count(), 2);
     assert_eq!(fs::read_dir(folder.join("images")).unwrap().count(), 4);
+    let mut entries: Vec<_> = fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["images"]);
 }
 
 #[test]
@@ -115,20 +127,18 @@ fn range_and_frame_limit_preserve_timestamps_and_late_coverage() {
     let folder = result_folder(&checked(
         cli(&source, &output).args(["--start", "00:02.23", "--end", "00:05.9", "--format", "png"]),
     ));
-    let info = manifest(&folder);
-    let frames = info["frames"].as_array().unwrap();
-    assert_eq!(frames.len(), 2, "{info}");
-    for frame in frames {
-        let time = frame["timestamp_seconds"].as_f64().unwrap();
+    let frames = images(&folder);
+    assert_eq!(frames.len(), 2);
+    for frame in &frames {
+        let time = timestamp(frame);
         assert!((2.23..5.9).contains(&time), "{time}");
-        assert!(frame["file"].as_str().unwrap().ends_with(".png"));
+        assert!(frame.extension().unwrap() == "png");
     }
     let capped = result_folder(&checked(cli(&source, &output).args(["--max-frames", "2"])));
-    let info = manifest(&capped);
-    let frames = info["frames"].as_array().unwrap();
+    let frames = images(&capped);
     assert_eq!(frames.len(), 2);
-    assert!(frames[0]["timestamp_seconds"].as_f64().unwrap() < 1.0);
-    assert!(frames[1]["timestamp_seconds"].as_f64().unwrap() > 6.0);
+    assert!(timestamp(&frames[0]) < 1.0);
+    assert!(timestamp(&frames[1]) > 6.0);
 }
 
 #[test]
@@ -141,9 +151,7 @@ fn exports_real_4k_and_downscales_without_upscaling() {
         let folder = result_folder(&checked(
             cli(&source, &output).args(["--resolution", resolution]),
         ));
-        let info = manifest(&folder);
-        let file = info["frames"][0]["file"].as_str().unwrap();
-        let image = image::open(folder.join(file)).unwrap();
+        let image = image::open(&images(&folder)[0]).unwrap();
         assert_eq!((image.width(), image.height()), dimensions);
     }
 }
@@ -204,7 +212,6 @@ fn portrait_variable_rate_video_keeps_aspect_ratio_and_actual_timestamps() {
         "--max-frames",
         "5",
     ])));
-    let info = manifest(&folder);
     let probe = checked(
         Command::new("ffprobe")
             .args([
@@ -233,17 +240,17 @@ fn portrait_variable_rate_video_keeps_aspect_ratio_and_actual_timestamps() {
                 .unwrap()
         })
         .collect();
-    let frames = info["frames"].as_array().unwrap();
+    let frames = images(&folder);
     assert!(frames.len() >= 2);
-    for frame in frames {
-        let image = image::open(folder.join(frame["file"].as_str().unwrap())).unwrap();
+    for frame in &frames {
+        let image = image::open(frame).unwrap();
         assert_eq!((image.width(), image.height()), (270, 480));
-        let time = frame["timestamp_seconds"].as_f64().unwrap();
+        let time = timestamp(frame);
         assert!((0.17..2.9).contains(&time));
         assert!(
             source_times
                 .iter()
-                .any(|source| (time - source).abs() < 1e-5),
+                .any(|source| (time - source).abs() <= 0.0005),
             "invented timestamp: {time}"
         );
     }
@@ -272,30 +279,8 @@ fn rotated_anamorphic_video_exports_square_pixels_in_display_orientation() {
         "--max-frames",
         "1",
     ])));
-    let info = manifest(&folder);
-    let image = image::open(folder.join(info["frames"][0]["file"].as_str().unwrap())).unwrap();
+    let image = image::open(&images(&folder)[0]).unwrap();
     assert_eq!((image.width(), image.height()), (240, 640));
-}
-
-#[test]
-fn contact_sheets_paginate() {
-    let root = TempDir::new().unwrap();
-    let source = root.path().join("motion.mp4");
-    generate_video(&source, "testsrc2=s=320x180:r=8:d=10", &[]);
-    let folder = result_folder(&checked(cli(&source, &root.path().join("output")).args([
-        "--sensitivity",
-        "high",
-        "--min-gap",
-        "0.25",
-        "--settle",
-        "0",
-        "--max-frames",
-        "25",
-    ])));
-    let info = manifest(&folder);
-    assert_eq!(info["frames"].as_array().unwrap().len(), 25);
-    assert_eq!(info["contact_sheets"].as_array().unwrap().len(), 2);
-    assert!(folder.join("contact-sheet-002.jpg").is_file());
 }
 
 #[test]
@@ -310,11 +295,10 @@ fn very_slow_source_exports_held_scenes_at_real_timestamps() {
     );
     generate_video(&source, graph, &["-r", "1"]);
     let folder = result_folder(&checked(&mut cli(&source, &root.path().join("output"))));
-    let info = manifest(&folder);
-    let frames = info["frames"].as_array().unwrap();
-    assert_eq!(frames.len(), 3, "{info}");
+    let frames = images(&folder);
+    assert_eq!(frames.len(), 3);
     for (index, frame) in frames.iter().enumerate() {
-        assert!((frame["timestamp_seconds"].as_f64().unwrap() - index as f64).abs() < 1e-6);
+        assert!((timestamp(frame) - index as f64).abs() < 1e-6);
     }
 }
 
@@ -528,6 +512,6 @@ exec "$REAL_FFMPEG" "$@"
         let requested = PathBuf::from(fs::read_to_string(opened).unwrap());
         assert_eq!(requested, folder.join("images"));
         assert!(requested.is_dir());
-        assert!(folder.join("manifest.json").is_file());
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
     }
 }

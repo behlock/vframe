@@ -1,6 +1,5 @@
 mod analysis;
 mod cli;
-mod contact;
 mod export;
 mod media;
 mod process;
@@ -11,20 +10,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Operation};
 use process::Cancellation;
-use serde::Serialize;
 use std::{fs, io::IsTerminal, path::PathBuf};
-
-#[derive(Serialize)]
-struct Manifest<'a> {
-    schema_version: u32,
-    tool_version: &'static str,
-    source: &'a source::SourceInfo,
-    settings: &'a cli::Settings,
-    video: &'a media::Video,
-    candidates_found: usize,
-    frames: &'a [export::Frame],
-    contact_sheets: &'a [String],
-}
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
@@ -97,7 +83,7 @@ fn run(mut cli: Cli, cancel: &Cancellation) -> Result<()> {
         moments.len(),
         candidates_found
     );
-    let frames = export::export(
+    export::export(
         &source.path,
         video,
         settings,
@@ -106,27 +92,10 @@ fn run(mut cli: Cli, cancel: &Cancellation) -> Result<()> {
         &image_dir,
         cancel,
     )?;
-    eprintln!("Building contact sheets…");
-    let sheets = contact::create(staging.path(), &source.info.title, &frames, cancel)?;
-    let manifest = Manifest {
-        schema_version: 1,
-        tool_version: env!("CARGO_PKG_VERSION"),
-        source: &source.info,
-        settings,
-        video,
-        candidates_found,
-        frames: &frames,
-        contact_sheets: &sheets,
-    };
-    fs::write(
-        staging.path().join("manifest.json"),
-        serde_json::to_vec_pretty(&manifest)?,
-    )?;
     let destination = storage::publish(staging, &source::safe_name(&source.info.title), cancel)?;
     println!(
-        "Saved {} images and {} contact sheet(s) to:\n{}",
-        frames.len(),
-        sheets.len(),
+        "Saved {} images to:\n{}",
+        moments.len(),
         destination.display()
     );
     if !cli.no_open

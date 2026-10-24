@@ -1,7 +1,6 @@
 use crate::process::Cancellation;
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use serde::Serialize;
 use std::{
     io::{self, Write},
     path::PathBuf,
@@ -37,7 +36,7 @@ pub struct Cli {
     pub no_open: bool,
 }
 
-#[derive(Debug, Args, Serialize)]
+#[derive(Debug, Args)]
 pub struct Settings {
     /// Maximum image dimensions: 480p, 720p, 1080p, 1440p, 2160p/4k, or original.
     #[arg(short, long, default_value = "1080p")]
@@ -73,8 +72,7 @@ pub enum Operation {
     Doctor,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Resolution(pub Option<u32>);
 
 impl FromStr for Resolution {
@@ -123,8 +121,7 @@ pub fn fit(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u3
     )
 }
 
-#[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Sensitivity {
     Low,
     Medium,
@@ -141,8 +138,7 @@ impl Sensitivity {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ImageFormat {
     #[value(alias = "jpeg")]
     Jpg,

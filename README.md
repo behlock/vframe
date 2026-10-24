@@ -26,7 +26,7 @@ vframes "YOUTUBE_URL" --start 02:00 --end 08:30 --max-frames 100
 vframes "/path/to/video.mp4" --format png --output ~/Pictures/Frames
 ```
 
-Each run creates a unique folder under `~/Pictures/VideoFrames` containing `images/`, contact sheets, and `manifest.json`, then opens the images in Finder.
+Each run creates a unique folder under `~/Pictures/VideoFrames` containing an `images/` subfolder, then opens the images in Finder.
 
 ### CLI Flags
 

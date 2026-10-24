@@ -3,16 +3,14 @@ use crate::{
     process::{self, Cancellation},
 };
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{io::BufRead, path::Path, process::Command};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct Video {
     pub width: u32,
     pub height: u32,
     pub duration: f64,
-    pub rotation: i32,
-    pub sample_aspect_ratio: f64,
 }
 
 #[derive(Deserialize)]
@@ -102,8 +100,6 @@ pub fn probe(path: &Path, cancel: &Cancellation) -> Result<Video> {
         width,
         height,
         duration,
-        rotation,
-        sample_aspect_ratio: sar,
     })
 }
 
