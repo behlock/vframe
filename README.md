@@ -29,8 +29,6 @@ vframes "https://x.com/body___shop/status/2114798995340144722?s=20"
 vframes "/path/to/video.mp4" --format png --output ~/Pictures/Frames
 ```
 
-Each run creates a unique folder under `~/Pictures/VideoFrames` containing an `images/` subfolder, then opens the images in Finder.
-
 ### CLI Flags
 
 - `--resolution`, `-r`: `480p`, `720p`, `1080p` (default), `1440p`, `2160p`/`4k`, or `original`.
