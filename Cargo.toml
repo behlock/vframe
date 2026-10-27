@@ -2,7 +2,7 @@
 name = "vframes"
 version = "0.1.0"
 edition = "2024"
-description = "Extract meaningful, timestamped frames from YouTube videos and local files"
+description = "Extract meaningful, timestamped frames from YouTube, X/Twitter, and local videos"
 
 [lints.rust]
 unsafe_code = "forbid"

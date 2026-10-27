@@ -32,6 +32,7 @@ struct Selector<'a> {
     settings: &'a Settings,
     width: usize,
     reference: Vec<u8>,
+    saved: Vec<u8>,
     previous: Vec<u8>,
     previous_time: f64,
     pending: Option<Candidate>,
@@ -44,6 +45,7 @@ impl<'a> Selector<'a> {
             settings,
             width,
             reference: Vec::new(),
+            saved: Vec::new(),
             previous: Vec::new(),
             previous_time: 0.0,
             pending: None,
@@ -52,6 +54,10 @@ impl<'a> Selector<'a> {
     }
 
     fn push(&mut self, time: f64, image: Vec<u8>) {
+        if self.settings.settle == 0.0 {
+            self.push_visual(time, image);
+            return;
+        }
         if self.reference.is_empty() {
             self.reference = image.clone();
             self.previous = image;
@@ -60,7 +66,9 @@ impl<'a> Selector<'a> {
             return;
         }
         let gap = time - self.previous_time;
-        if gap > 1.0 / self.settings.sample_rate as f64 + 1e-6 && gap >= self.settings.settle {
+        if (self.settings.sample_rate == 0 || gap > 1.0 / self.settings.sample_rate as f64 + 1e-6)
+            && gap >= self.settings.settle
+        {
             // Sparse recordings hold frames without producing duplicates to settle on.
             self.flush();
         }
@@ -104,12 +112,58 @@ impl<'a> Selector<'a> {
         self.previous_time = time;
     }
 
+    fn push_visual(&mut self, time: f64, image: Vec<u8>) {
+        let sharpness = sharpness(&image, self.width);
+        if let Some(pending) = self.pending.as_mut()
+            && difference(&self.reference, &image) < self.settings.sensitivity.threshold()
+        {
+            // Keep one sharp representative of each visually similar run.
+            // The fixed reference prevents gradual changes from drifting unnoticed.
+            if sharpness > pending.best_sharpness {
+                pending.best_time = time;
+                pending.best_sharpness = sharpness;
+                pending.best.clone_from(&image);
+            }
+            return;
+        }
+        self.flush();
+        self.reference.clone_from(&image);
+        self.pending = Some(Candidate {
+            started: time,
+            stable_since: time,
+            best_time: time,
+            best_sharpness: sharpness,
+            best: image,
+            change: 1.0,
+        });
+    }
+
     fn flush(&mut self) {
         if let Some(candidate) = self.pending.take() {
-            self.reference = candidate.best;
+            let change = if self.settings.settle == 0.0 {
+                let change = if self.saved.is_empty() {
+                    1.0
+                } else {
+                    difference(&self.saved, &candidate.best)
+                };
+                // Compare with the actual last export as well as the run anchor.
+                // Returning to an earlier scene is meaningful and remains eligible.
+                if change < self.settings.sensitivity.threshold()
+                    || self.moments.last().is_some_and(|last| {
+                        candidate.best_time - last.time + 1e-9 < self.settings.min_gap
+                    })
+                {
+                    return;
+                }
+                self.saved = candidate.best;
+                change
+            } else {
+                self.reference = candidate.best;
+                candidate.change
+            };
             self.moments.push(Moment {
                 time: candidate.best_time,
-                change: candidate.change,
+                change,
             });
         }
     }
@@ -158,11 +212,15 @@ pub fn analyse(
 ) -> Result<Vec<Moment>> {
     let (width, height) = video.analysis_dimensions();
     let frame_bytes = width as usize * height as usize * 3;
-    // Sample existing frames; fps conversion would invent timestamps in sparse videos.
-    let interval = 1.0 / settings.sample_rate as f64 - 1e-9;
-    let filter = format!(
-        "select='isnan(prev_selected_t)+gte(t-prev_selected_t,{interval:.12})',scale={width}:{height}:flags=area,setsar=1,showinfo"
-    );
+    // Inspect every source frame by default. Optional sampling selects existing
+    // frames rather than inventing timestamps through fps conversion.
+    let selection = if settings.sample_rate == 0 {
+        String::new()
+    } else {
+        let interval = 1.0 / settings.sample_rate as f64 - 1e-9;
+        format!("select='isnan(prev_selected_t)+gte(t-prev_selected_t,{interval:.12})',")
+    };
+    let filter = format!("{selection}scale={width}:{height}:flags=area,setsar=1,showinfo");
     let mut running = Running::spawn(
         media::decode_command(path, range)
             .args([
@@ -291,6 +349,73 @@ mod tests {
     fn solid(value: u8) -> Vec<u8> {
         vec![value; 12 * 12 * 3]
     }
+    fn visual_settings() -> Settings {
+        use clap::Parser;
+        crate::cli::Cli::parse_from(["vframes"]).settings
+    }
+
+    #[test]
+    fn visual_selection_keeps_brief_changes_and_ignores_near_duplicates() {
+        let settings = visual_settings();
+        let mut selector = Selector::new(&settings, 12);
+        // One-frame scenes at 60 fps must survive, including a return to red.
+        for (i, value) in [0, 1, 0, 100, 101, 200, 0, 1].into_iter().enumerate() {
+            selector.push(i as f64 / 60.0, solid(value));
+        }
+        selector.flush();
+        assert_eq!(selector.moments.len(), 4);
+        let times: Vec<_> = selector.moments.iter().map(|m| m.time).collect();
+        assert_eq!(times, vec![0.0, 3.0 / 60.0, 5.0 / 60.0, 6.0 / 60.0]);
+    }
+
+    #[test]
+    fn visual_selection_uses_sharpest_representative_and_detects_gradual_change() {
+        let settings = visual_settings();
+        let mut selector = Selector::new(&settings, 12);
+        selector.push(0.0, solid(100));
+        let mut detailed = solid(100);
+        for pixel in detailed.chunks_mut(6) {
+            pixel[..3].fill(104);
+        }
+        selector.push(0.01, detailed);
+        selector.push(0.02, solid(100));
+        selector.push(0.03, solid(200));
+        selector.flush();
+        assert_eq!(selector.moments.len(), 2);
+        assert_eq!(selector.moments[0].time, 0.01);
+
+        let mut selector = Selector::new(&settings, 12);
+        for value in 0..=100 {
+            selector.push(value as f64 / 60.0, solid(value));
+        }
+        selector.flush();
+        assert!(selector.moments.len() > 1, "slow changes must accumulate");
+        assert!(selector.moments.len() < 20, "small steps must be grouped");
+    }
+
+    #[test]
+    fn visual_selection_honours_explicit_gap_and_sensitivity() {
+        let mut settings = visual_settings();
+        settings.min_gap = 0.5;
+        let mut selector = Selector::new(&settings, 12);
+        for (time, value) in [(0.0, 0), (0.1, 100), (0.6, 200)] {
+            selector.push(time, solid(value));
+        }
+        selector.flush();
+        assert_eq!(selector.moments.len(), 2);
+        assert_eq!(selector.moments[1].time, 0.6);
+
+        for (sensitivity, expected) in [(Sensitivity::Low, 1), (Sensitivity::High, 2)] {
+            settings.sensitivity = sensitivity;
+            settings.min_gap = 0.0;
+            let mut selector = Selector::new(&settings, 12);
+            selector.push(0.0, solid(100));
+            selector.push(0.1, solid(110));
+            selector.flush();
+            assert_eq!(selector.moments.len(), expected);
+        }
+    }
+
     #[test]
     fn holds_transitions_removes_duplicates_and_preserves_revisits() {
         let settings = settings();

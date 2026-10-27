@@ -13,10 +13,10 @@ use std::{
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Turn a YouTube video or local file into meaningful, timestamped images."
+    about = "Turn a YouTube video, X/Twitter video, or local file into meaningful, timestamped images."
 )]
 pub struct Cli {
-    /// YouTube URL or local video path. Omit to paste a link interactively.
+    /// YouTube URL, X/Twitter post URL, or local video path. Omit to paste a link interactively.
     pub input: Option<String>,
     #[command(subcommand)]
     pub operation: Option<Operation>,
@@ -55,14 +55,14 @@ pub struct Settings {
     /// Maximum output images, spread over the full selected timeline.
     #[arg(long, default_value = "200", value_parser = clap::value_parser!(u32).range(1..=10000))]
     pub max_frames: u32,
-    /// Minimum seconds between selected images.
-    #[arg(long, default_value = "1", value_parser = nonnegative)]
+    /// Optional minimum seconds between selected images (0 = no time restriction).
+    #[arg(long, default_value = "0", value_parser = nonnegative)]
     pub min_gap: f64,
-    /// Seconds to wait for a changed image to settle.
-    #[arg(long, default_value = "0.5", value_parser = nonnegative)]
+    /// Optional settling delay in seconds (0 = capture by visual difference).
+    #[arg(long, default_value = "0", value_parser = nonnegative)]
     pub settle: f64,
-    /// Analysis samples per second (1–30). Shorter events may be missed.
-    #[arg(long, default_value = "4", value_parser = clap::value_parser!(u32).range(1..=30))]
+    /// Analysis samples per second (0 = every source frame; 1–30 = faster sampling).
+    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u32).range(0..=30))]
     pub sample_rate: u32,
 }
 
@@ -228,7 +228,10 @@ pub fn timestamp(seconds: f64) -> String {
 }
 
 pub fn prompt_input(cancel: &Cancellation) -> Result<String> {
-    let input = read_prompt("Paste a YouTube link or local video path: ", cancel)?;
+    let input = read_prompt(
+        "Paste a YouTube or X/Twitter link, or local video path: ",
+        cancel,
+    )?;
     let input = input.trim().trim_matches(['\'', '"']).to_owned();
     if input.is_empty() {
         bail!("No input provided");

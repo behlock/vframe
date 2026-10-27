@@ -39,7 +39,9 @@ fn run(mut cli: Cli, cancel: &Cancellation) -> Result<()> {
             cli.settings.resolution = cli::prompt_resolution(cli.settings.resolution, cancel)?;
             input
         }
-        None => anyhow::bail!("Provide a YouTube URL or local video path. See vframes --help."),
+        None => anyhow::bail!(
+            "Provide a YouTube URL, X/Twitter post URL, or local video path. See vframes --help."
+        ),
     };
     let settings = &cli.settings;
     settings.validate()?;
@@ -56,10 +58,14 @@ fn run(mut cli: Cli, cancel: &Cancellation) -> Result<()> {
         cli::timestamp(video.duration)
     );
     eprintln!(
-        "Analysing {}–{} at {} samples/s…",
+        "Analysing {}–{} ({})…",
         cli::timestamp(range.start),
         cli::timestamp(range.end),
-        settings.sample_rate
+        if settings.sample_rate == 0 {
+            "every source frame".to_owned()
+        } else {
+            format!("{} samples/s", settings.sample_rate)
+        }
     );
     let mut moments = analysis::analyse(&source.path, video, settings, range, cancel)?;
     let candidates_found = moments.len();

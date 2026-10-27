@@ -138,7 +138,68 @@ fn range_and_frame_limit_preserve_timestamps_and_late_coverage() {
     let frames = images(&capped);
     assert_eq!(frames.len(), 2);
     assert!(timestamp(&frames[0]) < 1.0);
-    assert!(timestamp(&frames[1]) > 6.0);
+    assert!(timestamp(&frames[1]) >= 6.0);
+}
+
+#[test]
+fn default_selection_captures_rapid_images_without_exporting_duplicate_frames() {
+    let root = TempDir::new().unwrap();
+    let source = root.path().join("rapid-images.mp4");
+    let graph = concat!(
+        "color=red:s=320x180:r=60:d=0.1[a];",
+        "color=green:s=320x180:r=60:d=0.1[b];",
+        "color=blue:s=320x180:r=60:d=0.1[c];",
+        "color=red:s=320x180:r=60:d=0.1[d];",
+        "[a][b][c][d]concat=n=4:v=1:a=0",
+    );
+    generate_video(&source, graph, &["-crf", "0"]);
+    let folder = result_folder(&checked(
+        cli(&source, &root.path().join("out")).args(["--format", "png"]),
+    ));
+    let frames = images(&folder);
+    assert_eq!(
+        frames.len(),
+        4,
+        "capture each image once, including revisits"
+    );
+    for (frame, (start, channel)) in frames.iter().zip([(0.0, 0), (0.1, 1), (0.2, 2), (0.3, 0)]) {
+        let time = timestamp(frame);
+        assert!(
+            (start..start + 0.1).contains(&time),
+            "wrong scene time: {time}"
+        );
+        let image = image::open(frame).unwrap().to_rgb8();
+        let pixel = image.get_pixel(100, 100);
+        assert!(pixel[channel] > 100);
+        for other in 0..3 {
+            if other != channel {
+                assert!(pixel[other] < 10);
+            }
+        }
+    }
+}
+
+#[test]
+fn exports_hundreds_of_distinct_frames_without_hitting_expression_limits() {
+    let root = TempDir::new().unwrap();
+    let source = root.path().join("many-changes.mp4");
+    generate_video(
+        &source,
+        "color=blue:s=64x64:r=60:d=4,drawbox=color=red:t=fill:enable='mod(n,2)'",
+        &["-crf", "0"],
+    );
+    let folder = result_folder(&checked(
+        cli(&source, &root.path().join("out")).args(["--max-frames", "1000"]),
+    ));
+    let frames = images(&folder);
+    assert_eq!(frames.len(), 240);
+    for (index, frame) in frames.iter().enumerate() {
+        assert!((timestamp(frame) - index as f64 / 60.0).abs() <= 0.0005);
+        let image = image::open(frame).unwrap().to_rgb8();
+        let pixel = image.get_pixel(32, 32);
+        let channel = if index % 2 == 0 { 2 } else { 0 };
+        assert!(pixel[channel] > 240, "wrong image exported at {index}");
+    }
 }
 
 #[test]
@@ -386,6 +447,100 @@ echo "$dest/source.mp4"
                 .to_string_lossy()
                 .starts_with('.'))
         );
+    }
+
+    #[test]
+    fn x_posts_export_frames_reuse_aliases_and_keep_selected_videos_separate() {
+        let root = TempDir::new().unwrap();
+        let source = fixture(root.path(), "320x180");
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let calls = root.path().join("calls");
+        executable(
+            &bin.join("yt-dlp"),
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'test-downloader'; exit 0; fi
+single=no
+no_playlist_metadata=no
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --paths) shift; dest="$1";;
+    --playlist-items) shift; [ "$1" = 1 ] && single=yes;;
+    --no-write-playlist-metafiles) no_playlist_metadata=yes;;
+    --js-runtimes) echo 'X should not require a JS runtime' >&2; exit 1;;
+    --) shift; url="$1"; break;;
+  esac
+  shift
+done
+[ "$single" = yes ] && [ "$no_playlist_metadata" = yes ] || exit 1
+echo "$url" >> "$TEST_CALLS"
+cp "$TEST_VIDEO" "$dest/source.mp4"
+echo '{"id":"2114798963140575232","display_id":"2114798995340144722","title":"X fixture","is_live":false}' > "$dest/source.info.json"
+echo "$dest/source.mp4"
+"#,
+        );
+        let cache = root.path().join("cache");
+        let out = root.path().join("output");
+        for (url, expected_downloads) in [
+            (
+                "https://x.com/body___shop/status/2114798995340144722?s=20",
+                1,
+            ),
+            (
+                "https://twitter.com/body___shop/status/2114798995340144722",
+                1,
+            ),
+            ("https://x.com/i/web/status/2114798995340144722/video/2", 2),
+            (
+                "https://mobile.twitter.com/body___shop/status/2114798995340144722/video/2?s=20",
+                2,
+            ),
+        ] {
+            let result = checked(
+                Command::new(env!("CARGO_BIN_EXE_vframes"))
+                    .args([url, "--no-open", "--max-frames", "1"])
+                    .arg("--cache-dir")
+                    .arg(&cache)
+                    .arg("--output")
+                    .arg(&out)
+                    .env("PATH", test_path(&bin))
+                    .env("TEST_CALLS", &calls)
+                    .env("TEST_VIDEO", &source),
+            );
+            assert_eq!(images(&result_folder(&result)).len(), 1);
+            assert_eq!(
+                fs::read_to_string(&calls).unwrap().lines().count(),
+                expected_downloads
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(&calls).unwrap(),
+            concat!(
+                "https://x.com/i/web/status/2114798995340144722\n",
+                "https://x.com/i/web/status/2114798995340144722/video/2\n",
+            )
+        );
+        assert!(cache.join("x-2114798995340144722").is_dir());
+        assert!(cache.join("x-2114798995340144722-video-2").is_dir());
+
+        // A downloaded media ID is allowed to differ, but the post must match.
+        let result = Command::new(env!("CARGO_BIN_EXE_vframes"))
+            .args(["https://x.com/test/status/999", "--no-open"])
+            .arg("--cache-dir")
+            .arg(&cache)
+            .arg("--output")
+            .arg(&out)
+            .env("PATH", test_path(&bin))
+            .env("TEST_CALLS", &calls)
+            .env("TEST_VIDEO", &source)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("Downloaded video ID does not match")
+        );
+        assert_eq!(fs::read_dir(cache.join("x-999")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&out).unwrap().count(), 4);
     }
 
     #[test]

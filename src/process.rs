@@ -166,7 +166,7 @@ pub fn doctor(cancel: &Cancellation) -> Result<()> {
         None => {
             missing = true;
             println!(
-                "YouTube JavaScript runtime: missing (install Deno 2.3+ or Node.js 22+; local videos still work)"
+                "YouTube JavaScript runtime: missing (install Deno 2.3+ or Node.js 22+; X/Twitter and local videos still work)"
             );
         }
     }

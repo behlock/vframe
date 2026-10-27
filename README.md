@@ -1,6 +1,6 @@
 # vframes
 
-Turn a YouTube link or local video into timestamped images.
+Turn a YouTube link, X post, or local video into timestamped images.
 
 ## Install
 
@@ -22,6 +22,9 @@ vframes "YOUTUBE_URL" --resolution 2160p --cache
 # Capture a section with a frame limit
 vframes "YOUTUBE_URL" --start 02:00 --end 08:30 --max-frames 100
 
+# Extract frames from a video on X
+vframes "https://x.com/body___shop/status/2114798995340144722?s=20"
+
 # Use a local video, PNG images, and a custom destination
 vframes "/path/to/video.mp4" --format png --output ~/Pictures/Frames
 ```
@@ -36,9 +39,9 @@ Each run creates a unique folder under `~/Pictures/VideoFrames` containing an `i
 - `--start`: Start time; defaults to `0`.
 - `--end`: Exclusive end time; defaults to the end of the video.
 - `--max-frames`: Maximum images across the selected timeline; `1–10000`, default `200`.
-- `--min-gap`: Minimum seconds between images; default `1`.
-- `--settle`: Seconds to let a changed image stabilise; `0–10`, default `0.5`.
-- `--sample-rate`: Analysis samples per second; `1–30`, default `4`.
+- `--min-gap`: Optional minimum seconds between images; default `0` (no time restriction).
+- `--settle`: Optional stabilisation delay; `0–10`, default `0` (visual grouping). A positive value enables the slower settling selector, which can skip briefly displayed images.
+- `--sample-rate`: Default `0` checks every source frame. Set `1–30` samples per second for faster analysis, at the risk of missing brief images.
 - `--output`, `-o`: Parent directory for the new result folder.
 - `--cache`: Keep and reuse downloaded sources; off by default.
 - `--cache-dir`: Custom cache directory; also enables caching.

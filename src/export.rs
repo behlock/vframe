@@ -18,15 +18,8 @@ pub fn export(
 ) -> Result<()> {
     let (width, height) = settings.resolution.dimensions(video.width, video.height);
     eprintln!("Image size: {width} × {height} (no upscaling)");
-    // Account for showinfo rounding so selection doesn't skip the sampled frame.
-    let selection = moments
-        .iter()
-        .map(|moment| {
-            let time = (moment.time - range.start - 1e-6).max(0.0);
-            format!("gte(t,{time:.9})*if(isnan(prev_selected_t),1,lt(prev_selected_t,{time:.9}))")
-        })
-        .collect::<Vec<_>>()
-        .join("+");
+    ensure!(!moments.is_empty(), "No frames selected for export");
+    let selection = selection_expression(moments, range.start);
     // A script avoids command-line length limits for large selections.
     let mut script = tempfile::NamedTempFile::new()?;
     write!(
@@ -83,4 +76,22 @@ pub fn export(
         fs::rename(original, directory.join(&filename)).context("Cannot name exported frame")?;
     }
     Ok(())
+}
+
+fn selection_expression(moments: &[Moment], start: f64) -> String {
+    if moments.len() == 1 {
+        // Account for showinfo rounding so selection doesn't skip the sampled frame.
+        let time = (moments[0].time - start - 1e-6).max(0.0);
+        return format!(
+            "gte(t,{time:.9})*if(isnan(prev_selected_t),1,lt(prev_selected_t,{time:.9}))"
+        );
+    }
+    // A flat sum hits FFmpeg's expression recursion limit with large selections.
+    // Parenthesised halves keep parser depth logarithmic in the number of frames.
+    let (left, right) = moments.split_at(moments.len() / 2);
+    format!(
+        "({})+({})",
+        selection_expression(left, start),
+        selection_expression(right, start)
+    )
 }

@@ -40,7 +40,27 @@ struct CacheRecord {
 struct DownloadInfo {
     title: Option<String>,
     id: String,
+    display_id: Option<String>,
     is_live: Option<bool>,
+}
+
+#[derive(Debug)]
+struct RemoteVideo {
+    url: String,
+    id: String,
+    cache_key: String,
+    is_x: bool,
+}
+
+impl RemoteVideo {
+    fn matches(&self, metadata: &DownloadInfo) -> bool {
+        if self.is_x {
+            // X media IDs differ from the post ID, which yt-dlp calls display_id.
+            metadata.display_id.as_deref() == Some(self.id.as_str())
+        } else {
+            metadata.id == self.id
+        }
+    }
 }
 
 pub fn resolve(input: &str, cli: &Cli, cancel: &Cancellation) -> Result<Source> {
@@ -59,21 +79,23 @@ pub fn resolve(input: &str, cli: &Cli, cancel: &Cancellation) -> Result<Source> 
             _temporary: None,
         });
     }
-    let (url, id) =
-        youtube_url(input).context("Expected an existing local video or a YouTube video URL")?;
+    let remote = remote_video(input).context(
+        "Expected an existing local video, a YouTube video URL, or an X/Twitter post URL",
+    )?;
+    let id = &remote.cache_key;
     let cache_root = if cli.cache || cli.cache_dir.is_some() {
         Some(
             cli.cache_dir
                 .clone()
                 .or_else(|| dirs::cache_dir().map(|p| p.join("vframes")))
                 .context("Cannot locate a cache directory; specify --cache-dir")?
-                .join(&id),
+                .join(id),
         )
     } else {
         None
     };
     if let Some(root) = &cache_root {
-        if let Some(source) = cached_source(root, &id, resolution, cancel)? {
+        if let Some(source) = cached_source(root, id, resolution, cancel)? {
             eprintln!("Reusing cached source: {}", source.path.display());
             return Ok(source);
         }
@@ -86,8 +108,12 @@ pub fn resolve(input: &str, cli: &Cli, cancel: &Cancellation) -> Result<Source> 
     }
 
     process::require("yt-dlp", cancel)?;
-    let runtime = process::js_runtime(cancel)?;
-    if runtime.is_none() {
+    let runtime = if remote.is_x {
+        None
+    } else {
+        process::js_runtime(cancel)?
+    };
+    if !remote.is_x && runtime.is_none() {
         eprintln!(
             "No supported JavaScript runtime found. YouTube downloads may fail; install Deno or Node.js 22+."
         );
@@ -128,18 +154,25 @@ pub fn resolve(input: &str, cli: &Cli, cancel: &Cancellation) -> Result<Source> 
         "--no-simulate",
         "--no-overwrites",
     ]);
+    if remote.is_x {
+        // A post can yield a playlist even with --no-playlist. Export one video
+        // and keep playlist metadata from replacing source.info.json.
+        command.args(["--playlist-items", "1", "--no-write-playlist-metafiles"]);
+    }
     if let Some(runtime) = runtime {
         command.args(["--js-runtimes", runtime]);
     }
     if let Some(height) = resolution.0 {
         command.args(["--format-sort", &format!("res:{height}")]);
     }
-    command
-        .arg("--paths")
-        .arg(staging.path())
-        .args(["--output", "source.%(ext)s", "--", &url]);
+    command.arg("--paths").arg(staging.path()).args([
+        "--output",
+        "source.%(ext)s",
+        "--",
+        &remote.url,
+    ]);
     let output = process::capture(&mut command, cancel)
-        .context("YouTube download failed. Run vframes doctor; updating yt-dlp can fix YouTube changes. Restricted videos may require authentication.")?;
+        .context("Video download failed. Run vframes doctor; updating yt-dlp can fix site changes. The post must contain an accessible video; restricted videos may require authentication.")?;
     let reported = output
         .lines()
         .rev()
@@ -159,7 +192,7 @@ pub fn resolve(input: &str, cli: &Cli, cancel: &Cancellation) -> Result<Source> 
         "Live streams are not supported"
     );
     ensure!(
-        metadata.id == id,
+        remote.matches(&metadata),
         "Downloaded video ID does not match the requested video"
     );
     let video = media::probe(&path, cancel).context("Downloaded source is not a readable video")?;
@@ -181,7 +214,7 @@ pub fn resolve(input: &str, cli: &Cli, cancel: &Cancellation) -> Result<Source> 
             requested_resolution: resolution.0,
             filename: filename.clone(),
             title,
-            video_id: id,
+            video_id: id.clone(),
         };
         fs::write(
             staging.path().join("cache.json"),
@@ -262,17 +295,68 @@ fn cached_source(
     Ok(None)
 }
 
-fn youtube_url(input: &str) -> Result<(String, String)> {
+fn remote_video(input: &str) -> Result<RemoteVideo> {
     let url = Url::parse(input)?;
     ensure!(
         matches!(url.scheme(), "https" | "http"),
-        "Use an HTTP(S) YouTube URL"
+        "Use an HTTP(S) YouTube or X/Twitter URL"
     );
     ensure!(
         url.username().is_empty() && url.password().is_none() && url.port().is_none(),
-        "Invalid YouTube URL"
+        "Invalid video URL"
     );
     let host = url.host_str().context("URL has no hostname")?;
+    if matches!(
+        host,
+        "x.com"
+            | "www.x.com"
+            | "m.x.com"
+            | "mobile.x.com"
+            | "twitter.com"
+            | "www.twitter.com"
+            | "m.twitter.com"
+            | "mobile.twitter.com"
+    ) {
+        let parts: Vec<_> = url
+            .path()
+            .trim_end_matches('/')
+            .split('/')
+            .skip(1)
+            .collect();
+        let (id, suffix) = match parts.as_slice() {
+            ["i", "web", "status", id, rest @ ..] | ["statuses", id, rest @ ..] => (*id, rest),
+            [user, "status", id, rest @ ..]
+                if !user.is_empty()
+                    && user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') =>
+            {
+                (*id, rest)
+            }
+            _ => bail!("X/Twitter URL must point to a single post"),
+        };
+        ensure!(
+            !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit()),
+            "Invalid X/Twitter post ID"
+        );
+        let index = match suffix {
+            [] => None,
+            ["video", index] => Some(
+                index
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|index| *index > 0)
+                    .context("Invalid X/Twitter video number")?,
+            ),
+            _ => bail!("X/Twitter URL must point to a post or /video/NUMBER"),
+        };
+        let suffix = index.map_or_else(String::new, |index| format!("/video/{index}"));
+        let cache_suffix = index.map_or_else(String::new, |index| format!("-video-{index}"));
+        return Ok(RemoteVideo {
+            url: format!("https://x.com/i/web/status/{id}{suffix}"),
+            id: id.to_owned(),
+            cache_key: format!("x-{id}{cache_suffix}"),
+            is_x: true,
+        });
+    }
     let id = match host {
         "youtu.be" => url
             .path_segments()
@@ -292,7 +376,7 @@ fn youtube_url(input: &str) -> Result<(String, String)> {
                 }
             }
         }
-        _ => bail!("Only YouTube URLs and local files are supported"),
+        _ => bail!("Only YouTube URLs, X/Twitter post URLs, and local files are supported"),
     }
     .context("URL must point to a single video")?;
     ensure!(
@@ -302,7 +386,12 @@ fn youtube_url(input: &str) -> Result<(String, String)> {
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
         "Invalid YouTube video ID"
     );
-    Ok((format!("https://www.youtube.com/watch?v={id}"), id))
+    Ok(RemoteVideo {
+        url: format!("https://www.youtube.com/watch?v={id}"),
+        cache_key: id.clone(),
+        id,
+        is_x: false,
+    })
 }
 
 pub fn safe_name(title: &str) -> String {
@@ -343,7 +432,7 @@ mod tests {
             "https://m.youtube.com/shorts/BaW_jenozKc",
         ] {
             assert_eq!(
-                youtube_url(input).unwrap().0,
+                remote_video(input).unwrap().url,
                 "https://www.youtube.com/watch?v=BaW_jenozKc"
             );
         }
@@ -354,9 +443,70 @@ mod tests {
             "https://youtube.com/watch?v=../../etc",
             "https://youtu.be/short",
         ] {
-            assert!(youtube_url(bad).is_err());
+            assert!(remote_video(bad).is_err());
         }
     }
+    #[test]
+    fn normalizes_x_posts_and_preserves_video_selection() {
+        for input in [
+            "https://x.com/body___shop/status/2114798995340144722?s=20",
+            "https://www.x.com/body___shop/status/2114798995340144722/",
+            "http://mobile.twitter.com/body___shop/status/2114798995340144722#video",
+            "https://twitter.com/i/web/status/2114798995340144722",
+            "https://x.com/statuses/2114798995340144722",
+        ] {
+            let remote = remote_video(input).unwrap();
+            assert!(remote.is_x);
+            assert_eq!(remote.url, "https://x.com/i/web/status/2114798995340144722");
+            assert_eq!(remote.cache_key, "x-2114798995340144722");
+        }
+        let remote =
+            remote_video("https://x.com/test/status/2114798995340144722/video/2?s=20").unwrap();
+        assert_eq!(
+            remote.url,
+            "https://x.com/i/web/status/2114798995340144722/video/2"
+        );
+        assert_eq!(remote.cache_key, "x-2114798995340144722-video-2");
+        for bad in [
+            "https://x.com.evil.test/test/status/123",
+            "https://x.com@test.example/test/status/123",
+            "https://user@x.com/test/status/123",
+            "https://x.com:123/test/status/123",
+            "ftp://x.com/test/status/123",
+            "https://x.com/test",
+            "https://x.com/test/status/",
+            "https://x.com/test/status/not-a-number",
+            "https://x.com/test/status/123/video/0",
+            "https://x.com/test/status/123/video/2/extra",
+            "https://x.com/test/status/123/photo/1",
+            "https://x.com/i/spaces/123",
+        ] {
+            assert!(remote_video(bad).is_err(), "accepted {bad}");
+        }
+    }
+
+    #[test]
+    fn checks_x_post_identity_separately_from_media_identity() {
+        let remote = remote_video("https://x.com/test/status/123").unwrap();
+        let mut metadata = DownloadInfo {
+            id: "456".into(),
+            display_id: Some("123".into()),
+            title: None,
+            is_live: Some(false),
+        };
+        assert!(remote.matches(&metadata));
+        metadata.display_id = Some("789".into());
+        assert!(!remote.matches(&metadata));
+        metadata.display_id = None;
+        assert!(!remote.matches(&metadata));
+        let youtube = remote_video("https://youtu.be/BaW_jenozKc").unwrap();
+        metadata.id = youtube.id.clone();
+        assert!(youtube.matches(&metadata));
+        metadata.id = "wrong-video".into();
+        metadata.display_id = Some(youtube.id.clone());
+        assert!(!youtube.matches(&metadata));
+    }
+
     #[test]
     fn filenames_are_safe_and_byte_bounded() {
         assert_eq!(safe_name("../hello:world/video"), "_hello_world_video");
